@@ -37,32 +37,127 @@ def extract_text(page: Page, xpath: str) -> str:
         logging.warning(f"Failed to extract text for xpath {xpath}: {e}")
     return ""
 
+def extract_text_first_match(page: Page, xpaths: List[str]) -> str:
+    for xp in xpaths:
+        text = extract_text(page, xp)
+        if text:
+            return text
+    return ""
+
+def fill_maps_search(page: Page, query: str) -> None:
+    """Google Maps DOM changes often; try several selectors (incl. role=search omnibox)."""
+    candidates = [
+        'input#searchboxinput',
+        'div[role="search"] input[type="text"]',
+        'xpath=//div[@role="search"]//input[not(@type="hidden")]',
+        'xpath=//div[@role="search"]//input[contains(@aria-label, "Maps") or contains(@aria-label, "Cartes") or contains(@aria-label, "Rechercher") or contains(@aria-label, "Search")]',
+    ]
+    last_err: Optional[Exception] = None
+    for sel in candidates:
+        loc = page.locator(sel).first
+        try:
+            loc.wait_for(state="visible", timeout=8000)
+            loc.fill(query)
+            return
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"Could not find Google Maps search input; last error: {last_err}")
+
+def handle_consent_if_present(page: Page) -> None:
+    """
+    Handle Google consent screen if it appears before Maps.
+    Supports common FR/EN labels and both accept/reject flows.
+    """
+    consent_buttons = [
+        'button:has-text("Tout accepter")',
+        'button:has-text("Tout refuser")',
+        'button:has-text("I agree")',
+        'button:has-text("Accept all")',
+        'button:has-text("Reject all")',
+    ]
+
+    # Consent is often served on consent.google.com before redirecting to maps.
+    if "consent.google." not in page.url and page.locator(consent_buttons[0]).count() == 0:
+        return
+
+    for selector in consent_buttons:
+        try:
+            btn = page.locator(selector).first
+            if btn.count() > 0:
+                btn.click(timeout=5000)
+                page.wait_for_timeout(1200)
+                return
+        except Exception:
+            continue
+
+def results_links_locator(page: Page):
+    # Keep selector broad enough for minor URL format changes.
+    return page.locator('//a[contains(@href, "/maps/place")]')
+
+def scroll_results_panel(page: Page) -> None:
+    """
+    Scroll the results feed (left panel) when available.
+    Falling back to mouse wheel can scroll the map instead of results.
+    """
+    feed_candidates = [
+        'div[role="feed"]',
+        'xpath=//div[@role="feed"]',
+        'xpath=//div[contains(@aria-label, "Results for") or contains(@aria-label, "Résultats pour")]',
+    ]
+    for selector in feed_candidates:
+        try:
+            feed = page.locator(selector).first
+            if feed.count() > 0:
+                feed.hover(timeout=3000)
+                feed.evaluate("(el) => { el.scrollBy(0, 1600); }")
+                return
+        except Exception:
+            continue
+    page.mouse.wheel(0, 10000)
+
 def extract_place(page: Page) -> Place:
-    # XPaths
-    name_xpath = '//div[@class="TIHn2 "]//h1[@class="DUwDvf lfPIob"]'
+    # XPaths — prefer data-item-id / role; use contains(@class) for hashed UI classes.
+    name_xpaths = [
+        '//div[contains(@class, "TIHn2")]//h1[contains(@class, "DUwDvf")]',
+        '//div[@role="main"]//h1[contains(@class, "DUwDvf")]',
+        '//h1[contains(@class, "DUwDvf")]',
+    ]
     address_xpath = '//button[@data-item-id="address"]//div[contains(@class, "fontBodyMedium")]'
     website_xpath = '//a[@data-item-id="authority"]//div[contains(@class, "fontBodyMedium")]'
     phone_number_xpath = '//button[contains(@data-item-id, "phone:tel:")]//div[contains(@class, "fontBodyMedium")]'
-    reviews_count_xpath = '//div[@class="TIHn2 "]//div[@class="fontBodyMedium dmRWX"]//div//span//span//span[@aria-label]'
-    reviews_average_xpath = '//div[@class="TIHn2 "]//div[@class="fontBodyMedium dmRWX"]//div//span[@aria-hidden]'
-    info1 = '//div[@class="LTs0Rc"][1]'
-    info2 = '//div[@class="LTs0Rc"][2]'
-    info3 = '//div[@class="LTs0Rc"][3]'
+    reviews_count_xpaths = [
+        '//div[contains(@class, "TIHn2")]//div[contains(@class, "fontBodyMedium") and contains(@class, "dmRWX")]//div//span//span//span[@aria-label]',
+        '//div[contains(@class, "TIHn2")]//span[@aria-label][contains(@aria-label, "review") or contains(@aria-label, "avis")]',
+    ]
+    reviews_average_xpaths = [
+        '//div[contains(@class, "TIHn2")]//div[contains(@class, "fontBodyMedium") and contains(@class, "dmRWX")]//div//span[@aria-hidden]',
+        '//div[contains(@class, "TIHn2")]//span[@aria-hidden="true"][contains(@class, "MW4etd")]',
+    ]
+    info1 = '//div[contains(@class, "LTs0Rc")][1]'
+    info2 = '//div[contains(@class, "LTs0Rc")][2]'
+    info3 = '//div[contains(@class, "LTs0Rc")][3]'
     opens_at_xpath = '//button[contains(@data-item-id, "oh")]//div[contains(@class, "fontBodyMedium")]'
-    opens_at_xpath2 = '//div[@class="MkV9"]//span[@class="ZDu9vd"]//span[2]'
-    place_type_xpath = '//div[@class="LBgpqf"]//button[@class="DkEaL "]'
-    intro_xpath = '//div[@class="WeS02d fontBodyMedium"]//div[@class="PYvSYb "]'
+    opens_at_xpath2 = '//div[contains(@class, "MkV9")]//span[contains(@class, "ZDu9vd")]//span[2]'
+    place_type_xpaths = [
+        '//div[contains(@class, "LBgpqf")]//button[contains(@class, "DkEaL")]',
+        '//button[contains(@class, "DkEaL")][@jsaction]',
+    ]
+    intro_xpaths = [
+        '//div[contains(@class, "WeS02d") and contains(@class, "fontBodyMedium")]//div[contains(@class, "PYvSYb")]',
+        '//div[contains(@class, "PYvSYb")]',
+    ]
 
     place = Place()
-    place.name = extract_text(page, name_xpath)
+    place.name = extract_text_first_match(page, name_xpaths)
     place.address = extract_text(page, address_xpath)
     place.website = extract_text(page, website_xpath)
     place.phone_number = extract_text(page, phone_number_xpath)
-    place.place_type = extract_text(page, place_type_xpath)
-    place.introduction = extract_text(page, intro_xpath) or "None Found"
+    place.place_type = extract_text_first_match(page, place_type_xpaths)
+    place.introduction = extract_text_first_match(page, intro_xpaths) or "None Found"
 
     # Reviews Count
-    reviews_count_raw = extract_text(page, reviews_count_xpath)
+    reviews_count_raw = extract_text_first_match(page, reviews_count_xpaths)
     if reviews_count_raw:
         try:
             temp = reviews_count_raw.replace('\xa0', '').replace('(','').replace(')','').replace(',','')
@@ -70,7 +165,7 @@ def extract_place(page: Page) -> Place:
         except Exception as e:
             logging.warning(f"Failed to parse reviews count: {e}")
     # Reviews Average
-    reviews_avg_raw = extract_text(page, reviews_average_xpath)
+    reviews_avg_raw = extract_text_first_match(page, reviews_average_xpaths)
     if reviews_avg_raw:
         try:
             temp = reviews_avg_raw.replace(' ','').replace(',','.')
@@ -121,29 +216,39 @@ def scrape_places(search_for: str, total: int) -> List[Place]:
         try:
             page.goto("https://www.google.com/maps/@32.9817464,70.1930781,3.67z?", timeout=60000)
             page.wait_for_timeout(1000)
-            page.locator('//input[@id="searchboxinput"]').fill(search_for)
+            handle_consent_if_present(page)
+            fill_maps_search(page, search_for)
             page.keyboard.press("Enter")
-            page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]')
-            page.hover('//a[contains(@href, "https://www.google.com/maps/place")]')
+            page.wait_for_selector('//a[contains(@href, "/maps/place")]')
+            results_links_locator(page).first.hover()
             previously_counted = 0
+            stagnation_rounds = 0
             while True:
-                page.mouse.wheel(0, 10000)
-                page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]')
-                found = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count()
+                scroll_results_panel(page)
+                page.wait_for_timeout(1200)
+                found = results_links_locator(page).count()
                 logging.info(f"Currently Found: {found}")
                 if found >= total:
                     break
                 if found == previously_counted:
-                    logging.info("Arrived at all available")
-                    break
+                    stagnation_rounds += 1
+                    # Allow several retries before concluding there is no more data.
+                    if stagnation_rounds >= 8:
+                        logging.info("Arrived at all available")
+                        break
+                else:
+                    stagnation_rounds = 0
                 previously_counted = found
-            listings = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').all()[:total]
+            listings = results_links_locator(page).all()[:total]
             listings = [listing.locator("xpath=..") for listing in listings]
             logging.info(f"Total Found: {len(listings)}")
             for idx, listing in enumerate(listings):
                 try:
                     listing.click()
-                    page.wait_for_selector('//div[@class="TIHn2 "]//h1[@class="DUwDvf lfPIob"]', timeout=10000)
+                    page.wait_for_selector(
+                        '//div[contains(@class, "TIHn2")]//h1[contains(@class, "DUwDvf")] | //h1[contains(@class, "DUwDvf")]',
+                        timeout=10000,
+                    )
                     time.sleep(1.5)  # Give time for details to load
                     place = extract_place(page)
                     if place.name:

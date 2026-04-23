@@ -59,7 +59,7 @@ To do a custom web scraping project you can find me on Upwork
 
 ## Usage
 
-Run the script with your desired search term and number of results:
+Run `main.py` with your desired search term and number of results:
 
 ```bash
 python main.py -s "Turkish Restaurants in Toronto Canada" -t 20
@@ -69,6 +69,24 @@ python main.py -s "Turkish Restaurants in Toronto Canada" -t 20
 - `-t` or `--total`: Number of results to scrape (default: 1)
 - `-o` or `--output`: Output CSV file path (default: result.csv)
 - `--append`: Append results to the output file instead of overwriting (default: off)
+
+Use `visualiser.py` to read and sort CSV output:
+
+```bash
+python visualiser.py -f result.csv
+```
+
+- `-f` or `--file`: Path to CSV file (default: `result.csv`)
+- `--rows`: Number of rows to display in terminal mode (default: `100`)
+- `--sort-by`: Column name used for sorting (applies to terminal mode and initial GUI load)
+- `--desc`: Sort in descending order (default is ascending)
+
+Sorting examples:
+
+```bash
+python visualiser.py -f result.csv --sort-by name
+python visualiser.py -f result.csv --sort-by reviews_count --desc --rows 200
+```
 
 ## Example
 
